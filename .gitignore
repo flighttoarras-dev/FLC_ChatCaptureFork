@@ -10,3 +10,20 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 /.tauri
 /src-tauri/target
+
+# Chronicler capture runtime files
+__pycache__/
+*.pyc
+capture_log.txt
+chatlogcaptures/
+
+# Superseded by PRIMER.md and CHANGES.md
+FLC_CHATCAPTURE_PLAN.md
+
+# Dev throwaway test scripts
+test_capture.py
+test_wealth.py
+test_wealth2.py
+test_output.txt
+test_wealth_output.txt
+test_wealth2_output.txt

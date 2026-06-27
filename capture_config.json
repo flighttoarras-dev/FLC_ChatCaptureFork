@@ -1,0 +1,14 @@
+{
+  "poll_interval_seconds": 5,
+  "debug_port": 9222,
+  "log_directory": "%USERPROFILE%\\Documents\\FLC Captures",
+  "log_file": "%USERPROFILE%\\Documents\\FLC Captures\\capture_log.txt",
+  "capture_private_gm_rolls": false,
+  "party_data_system": "pf2e",
+  "auto_launch": true,
+  "show_console": false,
+  "use_game_subfolders": false,
+  "game_schedules": {},
+  "capture_combat": true,
+  "capture_enemy_conditions": false
+}

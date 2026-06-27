@@ -1,3 +1,6 @@
+mod capture_launcher;
+
+use std::sync::Arc;
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
 use tauri::{AppHandle, Manager};
 
@@ -52,9 +55,12 @@ pub fn run() {
     unsafe {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--force-high-performance-gpu --allow-insecure-localhost --allow-running-insecure-content --block-new-web-contents=false",
+            "--force-high-performance-gpu --allow-insecure-localhost --allow-running-insecure-content --block-new-web-contents=false --remote-debugging-port=9222",
         );
     }
+
+    let capture_handle = capture_launcher::new_handle();
+    let handle_for_setup = Arc::clone(&capture_handle);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -62,7 +68,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(capture_handle)
+        .setup(move |app| {
+            capture_launcher::spawn(&handle_for_setup, app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![open_webview])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                capture_launcher::kill(app.state::<capture_launcher::CaptureHandle>().inner());
+            }
+        });
 }

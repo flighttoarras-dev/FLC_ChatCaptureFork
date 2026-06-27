@@ -35,11 +35,15 @@
 	},
 	"bundle": {
 		"active": true,
+		"resources": {
+			"../capture.py": "capture.py",
+			"../capture_config.json": "capture_config.json"
+		},
 		"longDescription": "Foundry Lightweight Client",
 		"category": "RolePlayingGame",
 		"copyright": "ruleplaying.com",
 		"targets": ["msi", "app", "dmg", "appimage"],
-		"createUpdaterArtifacts": true,
+		"createUpdaterArtifacts": false,
 		"icon": [
 			"icons/32x32.png",
 			"icons/128x128.png",
