@@ -59,6 +59,17 @@ pub fn run() {
         );
     }
 
+    // WebKitGTK white screen bug workaround
+    // https://github.com/khoj-ai/pipali/pull/44
+    #[cfg(target_os = "linux")]
+    unsafe {
+        for var in ["WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"] {
+            if std::env::var_os(var).is_none() {
+                std::env::set_var(var, "1");
+            }
+        }
+    }
+
     let capture_handle = capture_launcher::new_handle();
     let handle_for_setup = Arc::clone(&capture_handle);
 
