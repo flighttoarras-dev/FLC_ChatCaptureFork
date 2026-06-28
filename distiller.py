@@ -879,16 +879,48 @@ def build_stats(events, session_end=None, condition_apps=None):
 
     _COMBAT_TYPES = {"attack-roll", "damage-roll", "saving-throw", "damage-taken", "spell-cast", "ability-posted", "action"}
 
+    # ── Deletion classification ────────────────────────────────────────────────
+    # Group deleted events by deleted_at within a 1-second window.
+    # Events in the same window = bulk "Clear Chat Log"; lone events = individual deletions.
+    deleted_events = sorted(
+        (e for e in events if e.get("deleted") and e.get("deleted_at")),
+        key=lambda e: e["deleted_at"],
+    )
+    chat_clears        = []
+    individual_deletes = 0
+    if deleted_events:
+        group_start_str = deleted_events[0]["deleted_at"]
+        group_start_dt  = _parse_iso(group_start_str)
+        group           = [deleted_events[0]]
+        for e in deleted_events[1:]:
+            dt = _parse_iso(e["deleted_at"])
+            if dt and group_start_dt and (dt - group_start_dt).total_seconds() <= 1:
+                group.append(e)
+            else:
+                if len(group) > 1:
+                    chat_clears.append({"time": group_start_str, "count": len(group)})
+                else:
+                    individual_deletes += 1
+                group_start_str = e["deleted_at"]
+                group_start_dt  = dt
+                group           = [e]
+        if len(group) > 1:
+            chat_clears.append({"time": group_start_str, "count": len(group)})
+        else:
+            individual_deletes += 1
+
     return {
         "session": {
-            "duration_minutes":  duration_min,
-            "total_events":      len(active),
-            "events_by_type":    type_counts,
-            "gm_secret_count":   sum(1 for e in events if e.get("gm_secret")),
-            "deleted_count":     sum(1 for e in events if e.get("deleted")),
-            "most_active_actor": most_active,
-            "combat_events":     sum(1 for e in active if e.get("event_type") in _COMBAT_TYPES),
-            "chat_events":       type_counts.get("chat", 0),
+            "duration_minutes":    duration_min,
+            "total_events":        len(active),
+            "events_by_type":      type_counts,
+            "gm_secret_count":     sum(1 for e in events if e.get("gm_secret")),
+            "deleted_count":       sum(1 for e in events if e.get("deleted")),
+            "individual_deletes":  individual_deletes,
+            "chat_clears":         chat_clears,
+            "most_active_actor":   most_active,
+            "combat_events":       sum(1 for e in active if e.get("event_type") in _COMBAT_TYPES),
+            "chat_events":         type_counts.get("chat", 0),
         },
         "rolls": {
             "party":            roll_stat(party_rolls),
