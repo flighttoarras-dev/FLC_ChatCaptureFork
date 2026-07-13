@@ -14,6 +14,7 @@ import re
 import sys
 import urllib.request
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import websockets
@@ -40,7 +41,7 @@ def setup_logging(log_path):
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
+            RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"),
             logging.StreamHandler(sys.stderr),
         ],
     )

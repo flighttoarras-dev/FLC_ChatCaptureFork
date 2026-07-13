@@ -49,10 +49,30 @@ async fn open_webview(
     Ok(())
 }
 
+// WebView2's underlying browser process (msedgewebview2.exe) can persist in the
+// background after the app exits. If one lingers, the next launch silently reuses
+// it instead of starting fresh — which means WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+// (including --remote-debugging-port) never takes effect, and capture.py polls
+// forever for a CDP port that was never opened. Force-kill any stale instance
+// tied to this app's WebView2 data folder before we set the env var, so the
+// next one created is guaranteed to pick it up.
+#[cfg(target_os = "windows")]
+fn kill_stale_webview2_processes() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let script = r#"Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -match '\\flc\\EBWebView' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"#;
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output();
+}
+
 #[cfg(not(mobile))]
 pub fn run() {
     #[cfg(target_os = "windows")]
     unsafe {
+        kill_stale_webview2_processes();
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
             "--force-high-performance-gpu --allow-insecure-localhost --allow-running-insecure-content --block-new-web-contents=false --remote-debugging-port=9222",
