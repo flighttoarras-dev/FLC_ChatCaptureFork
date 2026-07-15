@@ -37,7 +37,8 @@
 		"active": true,
 		"resources": {
 			"../capture.py": "capture.py",
-			"../capture_config.json": "capture_config.json"
+			"../capture_config.json": "capture_config.json",
+			"../distiller.py": "distiller.py"
 		},
 		"longDescription": "Foundry Lightweight Client",
 		"category": "RolePlayingGame",

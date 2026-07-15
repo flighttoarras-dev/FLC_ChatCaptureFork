@@ -125,9 +125,38 @@ pub fn spawn(handle: &CaptureHandle, app: &AppHandle) {
 pub fn kill(handle: &CaptureHandle) {
     if let Ok(mut guard) = handle.lock() {
         if let Some(mut child) = guard.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            eprintln!("[capture] capture.py stopped");
+            // Signal capture.py to flush and exit cleanly before force-killing
+            let sentinel = std::env::temp_dir().join("flc_capture_shutdown");
+            let _ = std::fs::write(&sentinel, b"");
+
+            // Give it up to 3 seconds to exit (covers one poll cycle + distill)
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        eprintln!("[capture] capture.py exited cleanly");
+                        break;
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        eprintln!("[capture] capture.py force-killed after grace period");
+                        break;
+                    }
+                }
+            }
+
+            // Remove the sentinel unconditionally: if capture.py already
+            // unlinked it itself, this is a harmless no-op. If it exited (or
+            // was force-killed) without ever noticing it - e.g. it crashed
+            // for an unrelated reason right as this ran - leaving it behind
+            // would make the *next* launch see a stale sentinel and shut
+            // itself down immediately, before ever trying to reach Foundry.
+            let _ = std::fs::remove_file(&sentinel);
         }
     }
 }

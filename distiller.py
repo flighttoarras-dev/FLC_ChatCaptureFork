@@ -7,7 +7,8 @@ Shared upstream for Notion+GPT (recap/dossier) and homelab Postgres+pgvector.
 
 Usage:
     python distiller.py <input.json> [output.json]
-    If output is omitted, writes to <input>_distilled.json
+    python distiller.py <file1.json> <file2.json> ...   # merge split sessions
+    If output is omitted, writes to <first_input>_distilled.json
 
 ─────────────────────────────────────────────────────────────────────────────
 ARCHITECTURE BOUNDARY — READ BEFORE MODIFYING
@@ -48,6 +49,8 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+DISTILLER_VERSION = "1.1.0"
 
 
 # =============================================================================
@@ -1067,8 +1070,94 @@ def process_condition_timeline(enemy_conditions, events):
 
 
 # =============================================================================
+# Session merge
+# =============================================================================
+
+def merge_raw_sessions(paths):
+    """Load and merge multiple raw session JSON files into one combined dict."""
+    loaded = []
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            loaded.append((Path(p), json.load(f)))
+
+    loaded.sort(key=lambda x: (x[1].get("session_meta") or {}).get("start_time") or "")
+
+    first_meta = dict((loaded[0][1].get("session_meta") or {}))
+    last_meta  = loaded[-1][1].get("session_meta") or {}
+
+    # Messages — dedup by _id, sort by Foundry timestamp
+    seen_ids, messages = set(), []
+    for _, s in loaded:
+        for m in s.get("messages") or []:
+            mid = m.get("_id")
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                messages.append(m)
+    messages.sort(key=lambda m: m.get("timestamp") or 0)
+
+    state_timeline = sorted(
+        (e for _, s in loaded for e in (s.get("state_timeline") or [])),
+        key=lambda e: e.get("timestamp") or "",
+    )
+    combat_log = [e for _, s in loaded for e in (s.get("combat_log") or [])]
+    enemy_conditions = sorted(
+        (e for _, s in loaded for e in (s.get("enemy_conditions") or [])),
+        key=lambda e: e.get("time") or "",
+    )
+
+    first_meta["end_time"]    = last_meta.get("end_time")
+    first_meta["end_reason"]  = last_meta.get("end_reason")
+    first_meta["merged_from"] = [str(p) for p, _ in loaded]
+    first_meta.pop("split_from", None)
+    first_meta.pop("split_at",   None)
+
+    return {
+        "session_meta":     first_meta,
+        "session_start":    loaded[0][1].get("session_start"),
+        "session_end":      loaded[-1][1].get("session_end"),
+        "messages":         messages,
+        "state_timeline":   state_timeline,
+        "combat_log":       combat_log,
+        "enemy_conditions": enemy_conditions,
+    }
+
+
+# =============================================================================
 # Entry point
 # =============================================================================
+
+def _distill_raw(raw, output_path):
+    """Core distillation pipeline: process a raw session dict, write to output_path."""
+    messages = raw.get("messages") or []
+    system_version, core_version = lift_versions(messages)
+    session_end = raw.get("session_end")
+
+    events       = [distill_message(msg) for msg in messages]
+    actor_roster = build_actor_roster(messages, events, session_end)
+
+    enemy_conditions = raw.get("enemy_conditions") or []
+    condition_apps   = process_condition_timeline(enemy_conditions, events) if enemy_conditions else []
+
+    output = {
+        "distiller_version": DISTILLER_VERSION,
+        "session_meta":      raw.get("session_meta"),
+        "session_start":     raw.get("session_start"),
+        "session_end":       session_end,
+        "state_timeline":    raw.get("state_timeline"),
+        "combat_log":        raw.get("combat_log"),
+        "condition_apps":    condition_apps or None,
+        "system_version":    system_version,
+        "core_version":      core_version,
+        "actor_roster":      actor_roster,
+        "session_stats":     build_stats(events, session_end, condition_apps=condition_apps),
+        "events":            events,
+    }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    return events
+
 
 def distill(input_path, output_path=None):
     input_path = Path(input_path)
@@ -1080,39 +1169,9 @@ def distill(input_path, output_path=None):
     with open(input_path, encoding="utf-8") as f:
         raw = json.load(f)
 
-    messages = raw.get("messages") or []
-    system_version, core_version = lift_versions(messages)
-    session_end = raw.get("session_end")
-
-    # Pass 1 — distill events
-    events = [distill_message(msg) for msg in messages]
-
-    # Pass 1b/2 — build actor roster, classify roles, backfill actor_role + controller
-    actor_roster = build_actor_roster(messages, events, session_end)
-
-    # Pass 3 — condition timeline attribution (system-agnostic)
-    enemy_conditions = raw.get("enemy_conditions") or []
-    condition_apps   = process_condition_timeline(enemy_conditions, events) if enemy_conditions else []
-
-    output = {
-        "session_meta":    raw.get("session_meta"),
-        "session_start":   raw.get("session_start"),
-        "session_end":     session_end,
-        "state_timeline":  raw.get("state_timeline"),
-        "combat_log":      raw.get("combat_log"),
-        "condition_apps":  condition_apps or None,
-        "system_version":  system_version,
-        "core_version":    core_version,
-        "actor_roster":    actor_roster,
-        "session_stats":   build_stats(events, session_end, condition_apps=condition_apps),
-        "events":          events,
-    }
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-
+    events    = _distill_raw(raw, output_path)
     raw_size  = input_path.stat().st_size
-    dist_size = output_path.stat().st_size
+    dist_size = Path(output_path).stat().st_size
     pct       = (1 - dist_size / raw_size) * 100 if raw_size else 0
     gm_secret = sum(1 for e in events if e.get("gm_secret"))
     deleted   = sum(1 for e in events if e.get("deleted"))
@@ -1123,8 +1182,38 @@ def distill(input_path, output_path=None):
     print(f"Written:   {output_path}")
 
 
+def distill_merged(paths, output_path=None):
+    """Merge multiple raw session files and distill the combined result."""
+    paths = [Path(p) for p in paths]
+    if output_path is None:
+        output_path = paths[0].with_name(paths[0].stem + "_distilled.json")
+    else:
+        output_path = Path(output_path)
+
+    raw       = merge_raw_sessions(paths)
+    events    = _distill_raw(raw, output_path)
+    total_raw = sum(p.stat().st_size for p in paths)
+    dist_size = output_path.stat().st_size
+    pct       = (1 - dist_size / total_raw) * 100 if total_raw else 0
+    gm_secret = sum(1 for e in events if e.get("gm_secret"))
+    deleted   = sum(1 for e in events if e.get("deleted"))
+
+    print(f"Merged:    {len(paths)} files  ({total_raw:,} bytes total)")
+    print(f"Output:    {output_path.name}  ({dist_size:,} bytes)")
+    print(f"Reduction: {pct:.1f}%  |  {len(events)} events  |  {gm_secret} gm_secret  |  {deleted} deleted")
+    print(f"Written:   {output_path}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python distiller.py <input.json> [output.json]")
+        print("       python distiller.py <file1.json> <file2.json> ...  # merge split sessions")
         sys.exit(1)
-    distill(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+    if len(sys.argv) == 2:
+        distill(sys.argv[1])
+    elif len(sys.argv) == 3 and not sys.argv[2].endswith(".json"):
+        distill(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[2].endswith("_distilled.json"):
+        distill(sys.argv[1], sys.argv[2])
+    else:
+        distill_merged(sys.argv[1:])

@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import urllib.request
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -19,7 +20,18 @@ from pathlib import Path
 
 import websockets
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
+
+# Sentinel file written by capture_launcher.rs to request graceful shutdown
+_SHUTDOWN_SENTINEL = Path(tempfile.gettempdir()) / "flc_capture_shutdown"
+
+# Lazy import of distiller — not available in dev environments without it
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from distiller import distill as _distill, distill_merged as _distill_merged
+    _DISTILLER_AVAILABLE = True
+except ImportError:
+    _DISTILLER_AVAILABLE = False
 
 # =============================================================================
 # Config & logging
@@ -299,6 +311,87 @@ def should_capture(msg, capture_private):
             return False, False
         return True, True
     return True, False
+
+
+# =============================================================================
+# Distiller integration
+# =============================================================================
+
+def _find_merge_candidates(session_path, log_dir, game_title, gap_minutes=30):
+    """
+    Return a sorted list of raw session paths for game_title that should be
+    merged with session_path — any file in log_dir for the same game whose
+    start_time is within gap_minutes of an adjacent file.
+    """
+    if not game_title:
+        return [session_path]
+
+    slug = sanitize_filename(game_title)
+    candidates = []
+    for p in log_dir.glob("*.json"):
+        if "_distilled" in p.name or p == session_path:
+            continue
+        if slug not in p.name:
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                meta = json.load(f).get("session_meta") or {}
+            if meta.get("game_title") == game_title:
+                candidates.append((p, meta.get("start_time") or ""))
+        except Exception:
+            continue
+
+    try:
+        with open(session_path, encoding="utf-8") as f:
+            meta = json.load(f).get("session_meta") or {}
+        candidates.append((session_path, meta.get("start_time") or ""))
+    except Exception:
+        return [session_path]
+
+    candidates.sort(key=lambda x: x[1])
+
+    def parse_dt(s):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+
+    # Group consecutive files within gap_minutes of each other
+    chains, current = [], [candidates[0]]
+    for i in range(1, len(candidates)):
+        prev_dt = parse_dt(current[-1][1])
+        curr_dt = parse_dt(candidates[i][1])
+        if prev_dt and curr_dt and (curr_dt - prev_dt).total_seconds() <= gap_minutes * 60:
+            current.append(candidates[i])
+        else:
+            chains.append(current)
+            current = [candidates[i]]
+    chains.append(current)
+
+    for chain in chains:
+        paths = [p for p, _ in chain]
+        if session_path in paths:
+            return paths
+
+    return [session_path]
+
+
+def _run_distiller(session_path, log_dir, game_title):
+    """Auto-distill a closed session, merging split files if any are found."""
+    if not _DISTILLER_AVAILABLE:
+        logging.warning("distiller.py not found — skipping post-session distill")
+        return
+    try:
+        candidates = _find_merge_candidates(session_path, log_dir, game_title)
+        if len(candidates) > 1:
+            logging.warning("Merging %d session files for distillation", len(candidates))
+            _distill_merged(candidates)
+        else:
+            _distill(session_path)
+    except Exception as e:
+        logging.error("Distiller error: %s", e)
 
 
 # =============================================================================
@@ -615,6 +708,7 @@ async def poll_once(ws_url, config, log_dir, session):
             new_title  = meta.get("game_title")
             logging.warning("World change: %s → %s", prev_title, new_title)
             session.write(end_reason="world_change", next_world=new_title)
+            _run_distiller(session.path, session.log_dir, prev_title)
             session = Session(meta, log_dir, capture_private, split_from=prev_title,
                               use_subfolders=use_subfolders, game_schedules=game_schedules)
 
@@ -678,24 +772,40 @@ async def main():
     session    = None
     waiting_logged = False
 
-    while True:
-        ws_url = find_game_page(debug_port)
+    try:
+        while True:
+            # Graceful shutdown signal written by capture_launcher.rs before kill
+            if _SHUTDOWN_SENTINEL.exists():
+                try:
+                    _SHUTDOWN_SENTINEL.unlink()
+                except OSError:
+                    pass
+                logging.warning("Shutdown signal received — finalising session")
+                break
 
-        if ws_url:
-            waiting_logged = False
-            session, err = await poll_once(ws_url, config, log_dir, session)
-            if err:
-                logging.warning("CDP disconnected (%s) — waiting to reconnect", err)
-        else:
-            if not waiting_logged:
-                logging.warning("Waiting for Foundry game page on port %d…", debug_port)
-                waiting_logged = True
+            ws_url = find_game_page(debug_port)
 
-        await asyncio.sleep(interval)
+            if ws_url:
+                waiting_logged = False
+                session, err = await poll_once(ws_url, config, log_dir, session)
+                if err:
+                    logging.warning("CDP disconnected (%s) — waiting to reconnect", err)
+            else:
+                if not waiting_logged:
+                    logging.warning("Waiting for Foundry game page on port %d…", debug_port)
+                    waiting_logged = True
+
+            await asyncio.sleep(interval)
+    finally:
+        if session:
+            session.write(final=True)
+            _run_distiller(session.path, session.log_dir,
+                           session.meta.get("game_title"))
+        logging.warning("capture.py stopped")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.warning("capture.py stopped by user")
+        pass  # finally block in main() handles final write + distill
